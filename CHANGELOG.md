@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.2 — 2026-10-20
+
+- When Claude makes a sentence's period the link to more, or a spot with no words at all, the
+  sentence's words before it open it too, marked like the link, so there is a phrase to click
+  rather than one cell. This is in the terminal's fullscreen layout; the Claude desktop app draws
+  such a link as before.
+- The note sent with your next prompt names such a link by those words, so period links after
+  different sentences are told apart, and lists each one you left closed. Before, every period link
+  was called `"."`, and a closed one could drop out of the note.
+- A phrase you can open acts when the button comes up, so a drag that starts on it selects text, as
+  a drag anywhere else does. In the words before a lone period a double-click copies a word, so a
+  single click there opens its stretch half a second later, once no second click can follow.
+- While a stretch grows, half-drawn code no longer shows stray characters for a moment.
+
 ## 0.5.1 — 2026-10-19
 
 - A double-click in a paragraph that holds a stretch selects and copies the word under it, as
