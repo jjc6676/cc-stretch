@@ -52,8 +52,8 @@ into `<outDir>`, and exits 1 if a step failed; `node film/e2e/render.mjs <outDir
 
 - **Reach:** a reply whose paragraph holds a stretch; ask for "two stretches" in the prompt.
 - **Drive:**
-  1. Click a closed stretch (an underlined run that is not an OSC 8 link): its words grow in place,
-     tinted, ending in `«`.
+  1. Click a closed stretch (an underlined run that is not an OSC 8 link): as the button comes up,
+     its words grow in place, tinted, ending in `«`.
   2. Click the `«`: the stretch shrinks back to its short form.
 - **Writes:** nothing.
 - **Gotchas:** with `CLAUDE_CODE_NO_FLICKER=0` the session draws on the main screen, where every
@@ -61,7 +61,7 @@ into `<outDir>`, and exits 1 if a step failed; `node film/e2e/render.mjs <outDir
 
 ### Select text in a paragraph that holds a stretch
 
-- **Reach:** a press away from a stretch, dragged, or two on one word, inside such a paragraph.
+- **Reach:** a press on text or on a stretch, dragged, or two on one word, inside such a paragraph.
 - **Drive:**
   1. Press, move with the button held, release inside the paragraph: the cells crossed are drawn
      inverse and their text is on the clipboard.
@@ -72,6 +72,25 @@ into `<outDir>`, and exits 1 if a step failed; `node film/e2e/render.mjs <outDir
 - **Writes:** the clipboard; save its text first and put it back.
 - **Gotchas:** the paragraph hears the pointer leave only after it has heard it inside, so a driver
   that only sends a motion outside never clears a highlight.
+
+### Click the words before a lone period
+
+- **Reach:** a stretch whose short form has no words, such as `It merged{{.|, and passed.}}` or an
+  empty short form. `film/e2e/lead-in.mjs` has Claude write a fixed sample through
+  `--append-system-prompt` and checks the steps below.
+- **Drive:**
+  1. The sentence's words before the link, back to its start, are underlined like the link; another
+     link in the same sentence stays apart from them.
+  2. Click those words: the stretch opens about half a second later, once a double-click can no
+     longer follow.
+  3. Double-click a word among them, or drag across them: the text is selected and copied, and the
+     stretch stays closed.
+  4. While another stretch in the paragraph grows, they stay underlined, and a click on them opens
+     their stretch.
+  5. Send a prompt: the note to Claude names the opened stretch by those words.
+- **Writes:** the clipboard; the check keeps its text and puts it back.
+- **Gotchas:** run the check from a folder Claude Code already trusts; it does not answer the trust
+  question, which is the person's to answer.
 
 ### The style toolbar
 

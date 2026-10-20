@@ -4,8 +4,8 @@ import type { ClassicEventOf, ClassicResultOf, EngineInterface, Register, Render
 import { GUIDE } from './guide'
 import { closeAfter, codeSpan, hideLongForms, isLinkable, isOpenable, KEY_SEPARATOR, newStreamState, paragraphsOf, parentOf, parse, stretches } from './parse'
 import type { Segment, StreamState, Stretch } from './parse'
-import { targetsIn } from './layout'
-import type { Action } from './layout'
+import { namesOf, openedOf, targetsIn } from './layout'
+import type { Action, OpenedStretch } from './layout'
 import { contrastOn, hex, mix } from './contrast'
 import type { Hex, Rgb } from './contrast'
 import { isColour, isSameLook, lookOf, MARK_NAMES, marksSetting, storedLook, TINTED } from './look'
@@ -13,7 +13,10 @@ import type { DrawnLook, Highlight, Look, Mark } from './look'
 import type { ReplyPost, ReplyProps, Tint } from './reply'
 
 const openStretches = atom({ plugin: 'cc-stretch', key: 'open' } as const, [])
-const seen = atom({ plugin: 'cc-stretch', key: 'seen' } as const, [])
+// Kept under a shape tag: before 0.5.2 it held short forms, and as of Claude Code 2.1.304 plugin state
+// outlives a reload of the plugin's code, so a session that loaded 0.5.1 still holds them; under the
+// tag they read as absent.
+const seen = atom({ plugin: 'cc-stretch', key: 'seen' } as const, [], { shape: 'opened-stretches' })
 const stretchOrder = atom({ plugin: 'cc-stretch', key: 'order' } as const, { order: {}, count: 0 })
 const newestReply = atom({ plugin: 'cc-stretch', key: 'newest' } as const, '')
 const askedStretch = atom({ plugin: 'cc-stretch', key: 'ask' } as const, null)
@@ -357,17 +360,24 @@ export const register: Register = (on, options) => {
     if (e.origin.kind !== 'composer') return next(e)
 
     const opened = await read($, seen)
-    // A stretch that is not a link is drawn open, so it is neither opened nor unopened.
-    const written = stretches(parse(lastReply(await $.session.messages())))
-      .filter(isLinkable)
-      .map(stretch => stretch.short.trim())
-    const unopened = written.filter(short => !opened.includes(short))
+    // A stretch that is not a link is drawn open, so it is neither opened nor unopened. Each is named
+    // as its paragraph draws it, where a lone period is named with the words before it.
+    const written = paragraphsOf(lastReply(await $.session.messages()))
+      .filter(paragraph => paragraph.hasStretch)
+      .flatMap(({ text }) => {
+        const parts = parse(text)
+        const names = namesOf(parts)
+        return stretches(parts)
+          .filter(isLinkable)
+          .map(stretch => openedOf(stretch, names))
+      })
+    const unopened = written.filter(stretch => !opened.some(was => isSameStretch(was, stretch)))
     await update($, seen, () => [])
     await update($, newestReply, () => '')
     await update($, lettering, () => null)
     if (opened.length === 0 && unopened.length === 0) return next(e)
 
-    const quote = (list: string[]) => list.map(s => `"${s}"`).join(', ')
+    const quote = (list: OpenedStretch[]) => list.map(stretch => `"${stretch.name}"`).join(', ')
     // A prompt cannot tell whether the reply was drawn where clicks land, so with no clicks the
     // note names both cases.
     const note =
@@ -418,8 +428,8 @@ export const register: Register = (on, options) => {
         }
         if (action !== 'open') return
         await update($, open, list => (list.includes(key) ? list : [...list, key]))
-        const short = stretch.short.trim()
-        await update($, seen, list => (list.includes(short) ? list : [...list, short]))
+        const opened = openedOf(stretch, namesOf(parts))
+        await update($, seen, list => (list.some(was => isSameStretch(was, opened)) ? list : [...list, opened]))
       }
       return <Markdown key="stretch" text={text} pressableLinks={links} onLinkPress={link => void press(link.href)} />
     }
@@ -516,7 +526,7 @@ export const register: Register = (on, options) => {
     if (post === undefined) return next(e)
     await update($, memberOf(openStretches, { requestId: `${e.requestId}#${e.element}` }), () => post.open)
     const { opened } = post
-    if (opened !== undefined) await update($, seen, list => (list.includes(opened.short) ? list : [...list, opened.short]))
+    if (opened !== undefined) await update($, seen, list => (list.some(was => isSameStretch(was, opened)) ? list : [...list, { source: opened.source, name: opened.name }]))
 
     // Each open stretch keeps the count it was opened at, across the reply's paragraphs, which picks
     // its colour outside the tinted highlight; a nested one skips its parent's colour. The newest is the
@@ -707,15 +717,19 @@ function writeOpen(parts: Segment[]): string {
   return parts.map(part => (typeof part === 'string' ? part : part.long === undefined ? part.short : writeOpen(part.long))).join('')
 }
 
+function isSameStretch(a: OpenedStretch, b: OpenedStretch): boolean {
+  return a.source === b.source && a.name === b.name
+}
+
 /** A Client's post, if it is one: the open stretches, and the one just opened. */
 function replyPostOf(data: unknown): ReplyPost | undefined {
   if (typeof data !== 'object' || data === null || !('open' in data) || !Array.isArray(data.open)) return undefined
   const open = data.open.filter((key): key is string => typeof key === 'string')
   const opened: unknown = 'opened' in data ? data.opened : undefined
-  if (typeof opened !== 'object' || opened === null || !('short' in opened) || !('key' in opened)) return { open }
-  const { short, key } = opened
+  if (typeof opened !== 'object' || opened === null || !('name' in opened) || !('source' in opened) || !('key' in opened)) return { open }
+  const { name, source, key } = opened
 
-  return typeof short === 'string' && typeof key === 'string' ? { open, opened: { short, key } } : { open }
+  return typeof name === 'string' && typeof source === 'string' && typeof key === 'string' ? { open, opened: { name, source, key } } : { open }
 }
 
 /** A Client's post of text to copy, if it is one. */

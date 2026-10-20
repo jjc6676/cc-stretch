@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { measure, openedFrom, render, words } from '../bench/measure.ts'
+import { shortsNamed } from '../bench/opened.ts'
 import { growthOf } from '../hooks/grow.ts'
 import { parse } from '../hooks/parse.ts'
 import { adjudicate, hiddenIn, verdictsOf } from '../bench/rules.ts'
@@ -57,6 +58,15 @@ describe('benchmark measures', () => {
     expect(hiddenIn('Three steps:\n+ a\n+ b\n1) c')).toBe('sections')
     expect(hiddenIn('Two steps:\n1. a\n2. b')).toBe(undefined)
     expect(hiddenIn('The cache is keyed by **the lockfile** and **the platform**.')).toBe(undefined)
+  })
+
+  test('reads a lone period or an empty short form back from the words the note names it by', async () => {
+    const reply = 'It merged{{.|, and passed.}} It is **approved**{{.|, but blocked.}} The check exited 0{{|, so no errors}}. {{Done.|Done in `ci.ts`.}}'
+    expect([...shortsNamed(reply, openedFrom('Stretchtext: since your last reply the reader opened "It is **approved**.", "The check exited 0.". They did not open "It merged.", "Done.".'))]).toEqual(['It is **approved**.', 'The check exited 0.', '.', ''])
+    expect([...shortsNamed(reply, new Set(['Done.']))]).toEqual(['Done.'])
+    // A note from before 0.5.2 names a stretch by its short form, which is never read as lead-in words.
+    expect([...shortsNamed('The check {{exited 0|exited with code 0}}{{|, so no errors}}.', new Set(['exited 0']))]).toEqual(['exited 0'])
+    expect([...shortsNamed('It merged {{.|, and passed.}}', new Set(['It merged .']))]).toEqual(['It merged .', '.'])
   })
 })
 

@@ -75,6 +75,10 @@ never lose your place.
 ## What else it does
 
 - **Stretches nest.** A long form can hold more stretches.
+- **Words to click before a lone period.** When Claude makes a sentence's period the link to more,
+  or a spot with no words at all, the sentence's words before it open it too, marked like the link,
+  so there is a phrase to click rather than one cell. This is in the terminal's fullscreen layout;
+  in the Claude desktop app only the short form is the link.
 - **Streaming stays clean.** While a reply streams, stretches already show as their short forms.
 - **Letters for the keyboard.** In the terminal's fullscreen layout, alt+↓ or ctrl+↓ puts a letter
   over each closed stretch in the latest three replies on screen that hold one (up to 26), and
@@ -109,9 +113,12 @@ never lose your place.
 - In the terminal the plugin draws each paragraph that holds a stretch itself, and as of Claude
   Code 2.1.302 its transcript selects nothing in it. A drag there is the plugin's: the text it
   crosses is drawn inverse and copied when the button comes up, and it stays within that paragraph.
+  A phrase you can open acts when the button comes up too, so a drag that starts on one selects.
   A double-click there selects and copies the word under it, as Claude Code 2.1.303 does in a
   paragraph without a stretch, except that the `#` of an id such as `#12806` stays in the word and
-  any full stops after it stay out.
+  any full stops after it stay out. In the words before a lone period, a double-click copies a word
+  as well, so a single click there opens its stretch half a second later, once no second click
+  can follow.
 - Claude writes every level up front, so a reply costs about as many tokens as before. You read
   less; you don't pay less.
 - The `{{short|long}}` markup shows as raw text wherever the plugin isn't loaded.

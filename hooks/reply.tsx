@@ -1,8 +1,8 @@
 import type { ClientModule, ClientPointerEvent, ClientSurface, TextProps } from 'claude-code'
 
 import { grow, lengthOf } from './grow'
-import { continuationOf, isMarkup, layout, link, linkAt, targetsIn, tint, widthOf } from './layout'
-import type { Action, Row, Run } from './layout'
+import { continuationOf, isMarkup, layout, link, linkAt, namesOf, openedOf, targetsIn, tint, widthOf, withLeadIns } from './layout'
+import type { Action, OpenedStretch, Row, Run } from './layout'
 import { closeAfter, isLinkable, KEY_SEPARATOR, parse } from './parse'
 import { DEFAULT_LOOK, drawsHighlight, lookProps } from './look'
 import type { Hex } from './contrast'
@@ -43,9 +43,9 @@ export type ReplyProps = {
 
 /**
  * What the instance posts to the hooks module when the open stretches change, with the stretch the
- * reader just opened: its short form for the note to Claude, its key for its colour.
+ * reader just opened: as the note to Claude names it, and its key, for its colour.
  */
-export type ReplyPost = { open: string[]; opened?: { short: string; key: string } }
+export type ReplyPost = { open: string[]; opened?: OpenedStretch & { key: string } }
 
 /** What the instance posts to the hooks module when the reader drags across its text: the text, for the clipboard. */
 export type CopyPost = { copy: string }
@@ -60,9 +60,11 @@ type Growth = { key: string; isOpening: boolean; progress: number; duration: num
 type Cell = { x: number; y: number }
 /**
  * Text the reader dragged across: from the cell the press went down on to the one under the pointer.
- * A word picked by a double-click covers both its ends, even when they are the same cell.
+ * A word picked by a double-click covers both its ends, even when they are the same cell. `link` is
+ * the link the press went down on, which its release acts on unless the pointer `hasMoved` to another
+ * cell first.
  */
-type Selection = { anchor: Cell; head: Cell; isDragging: boolean; isWord?: true }
+type Selection = { anchor: Cell; head: Cell; isDragging: boolean; isWord?: true; link?: Run['link']; hasMoved?: true }
 /**
  * One cell a double-click looks through for a word: what it shows, and where. `startsApart` marks
  * the first cell of a row that no word runs onto from the row before.
@@ -77,6 +79,8 @@ const FRAME_MS = 16
 // so a paragraph that holds a stretch answers like the paragraphs around it.
 const DOUBLE_CLICK_MS = 500
 const DOUBLE_CLICK_CELLS = 1
+// Lead-in words open once a second press can no longer make a double-click of the first.
+const DOUBLE_CLICK_FRAMES = Math.ceil(DOUBLE_CLICK_MS / FRAME_MS)
 // What a double-click takes as one word: Claude Code 2.1.303's own word characters, and `#` as well,
 // so that `#12806` comes out whole.
 const WORD = /[\p{L}\p{N}_/.\-+~\\#]/u
@@ -93,11 +97,16 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 const drawn = new WeakMap<object, { laid: Row[]; rows: Row[]; segments: Segment[] }>()
 // The last ask each instance was handed, acted on at its next frame rather than while drawing.
 const asks = new WeakMap<object, Ask>()
-// The last press each instance saw, where and when it went down, so the next press soon after and
-// close by makes a double-click; a quick third press, measured from the second, picks the word
-// again. It is dropped when its release lands on another cell, so two quick drags from one cell
-// stay two drags, and when a stretch opens or closes, which ends a double-click begun before it.
-const presses = new WeakMap<object, Cell & { at: number }>()
+// The last press each instance saw, where and when it went down, and the stretch whose lead-in words
+// it went down on, if any, so the next press soon after, close by and on the same words makes a
+// double-click; a quick third press, measured from the second, picks the word again. It is dropped
+// when its release lands on another cell, so two quick drags from one cell stay two drags, and when a
+// stretch opens or closes, which ends a double-click begun before it.
+const presses = new WeakMap<object, Cell & { at: number; key?: string }>()
+// A click on lead-in words, per instance: the stretch it opens, the frames left before a second press
+// can no longer make it a double-click, and whether the button is up. A double-click there picks a
+// word, as it does in any text, and a drag from there selects.
+const pendingOpens = new WeakMap<object, { key: string; framesLeft: number; isReleased: boolean }>()
 
 const Reply: ClientModule<ReplyProps, State> = (props, surface) => {
   const { Box, Link, Text } = surface.elements
@@ -152,7 +161,12 @@ export default Reply
  * full then a «, the words each added in its tint.
  */
 function compose(segments: Segment[], state: State, tints: ReadonlyMap<string, Tint>): string {
-  const write = (parts: Segment[]): string => parts.map(part => (typeof part === 'string' ? part : draw(part))).join('')
+  // The lead-in words of a link with no words of its own open it too, also while another stretch
+  // grows: `layout` never lets half a code span or link drawn by that growth run over their marks.
+  const write = (parts: Segment[], isParagraphEnd = false): string =>
+    withLeadIns(parts, stretch => !state.open.includes(stretch.key), isParagraphEnd)
+      .map(part => (typeof part === 'string' ? part : draw(part)))
+      .join('')
   const draw = (stretch: Stretch): string => {
     if (stretch.long === undefined || !stretch.isClosed) return stretch.short
     // A short form over several lines is drawn open, or as written when its long form is empty.
@@ -166,12 +180,13 @@ function compose(segments: Segment[], state: State, tints: ReadonlyMap<string, T
     return closeAfter(long, colours === undefined ? closer : tint(colours.closer, closer), '\n')
   }
 
-  return write(segments)
+  return write(segments, true)
 }
 
 /**
- * The rows with each letter drawn over the first character of what a press on its stretch acts on,
- * its short form or its «, so nothing on screen moves; the rest of that text is marked.
+ * The rows with each letter drawn over the first character of what a press on its stretch acts on:
+ * its lead-in words if it has them, else its short form, or its «, so nothing on screen moves; the
+ * rest of that text is marked.
  */
 function lettered(rows: Row[], letters: Letters | null): DrawnRun[][] {
   if (letters === null) return rows
@@ -195,11 +210,12 @@ function lettered(rows: Row[], letters: Letters | null): DrawnRun[][] {
 }
 
 /**
- * A press on a short form or a « opens or closes its stretch. As of Claude Code 2.1.302 a Client
- * holds the pointer from a press until its release and the transcript selects nothing meanwhile, so a
- * drag from anywhere else selects here: the cells it crosses are highlighted, and on release their
- * text goes to the clipboard. A double-click selects here too, taking the URL or word under it at
- * once.
+ * A click on a short form or a « opens or closes its stretch as the button comes up, and a click on
+ * lead-in words opens it once no second press has made a double-click. As of Claude Code 2.1.302
+ * a Client holds the pointer from a press until its release and the transcript selects nothing
+ * meanwhile, so a drag from anywhere, a link included, selects here: the cells it crosses are
+ * highlighted, and on release their text goes to the clipboard. A double-click selects here too,
+ * taking the URL or word under it at once, except on a short form or a «, which the first click acted on.
  */
 function pointer(surface: ClientSurface<State>, event: ClientPointerEvent) {
   const state = surface.state
@@ -208,7 +224,7 @@ function pointer(surface: ClientSurface<State>, event: ClientPointerEvent) {
   const { selection } = state
   if (event.type === 'down' && event.button === 'left') {
     const target = linkAt(shown.rows, event.x, event.y)
-    if (target !== undefined && openOrClose(surface, target.action, target.key)) return
+    const leadInKey = target?.isLeadIn === true ? target.key : undefined
     const cell = clamped(shown.rows, event)
     const at = performance.now()
     const last = presses.get(surface)
@@ -216,17 +232,25 @@ function pointer(surface: ClientSurface<State>, event: ClientPointerEvent) {
       last !== undefined &&
       at - last.at < DOUBLE_CLICK_MS &&
       Math.abs(cell.x - last.x) <= DOUBLE_CLICK_CELLS &&
-      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_CELLS
-    const word = isDouble ? wordAt(shown.laid, cell) : undefined
-    presses.set(surface, { ...cell, at })
+      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_CELLS &&
+      last.key === leadInKey
+    // A press that makes no double-click of a click on lead-in words lets that click open its stretch
+    // first, so two quick clicks on two stretches open both.
+    if (pendingOpens.get(surface)?.isReleased === true && !isDouble) openPending(surface)
+    const latest = surface.state ?? state
+    // A double-click picks a word in text and in lead-in words, not on a short form or a «.
+    const word = isDouble && (target === undefined || leadInKey !== undefined) ? wordAt(shown.laid, cell) : undefined
+    presses.set(surface, { ...cell, at, ...(leadInKey !== undefined && { key: leadInKey }) })
     if (word !== undefined) {
+      pendingOpens.delete(surface)
       const picked: Selection = { ...word, isDragging: false, isWord: true }
-      surface.setState({ ...state, selection: picked })
+      surface.setState({ ...latest, selection: picked })
       const text = textIn(shown.laid, picked)
       if (text !== '') surface.post({ copy: text } satisfies CopyPost)
       return
     }
-    surface.setState({ ...state, selection: { anchor: cell, head: cell, isDragging: true } })
+    if (leadInKey !== undefined) pendingOpens.set(surface, { key: leadInKey, framesLeft: DOUBLE_CLICK_FRAMES, isReleased: false })
+    surface.setState({ ...latest, selection: { anchor: cell, head: cell, isDragging: true, ...(target !== undefined && { link: target }) } })
     return
   }
   // A selection left on screen goes once the pointer moves off the paragraph: as of Claude Code
@@ -238,10 +262,21 @@ function pointer(surface: ClientSurface<State>, event: ClientPointerEvent) {
   if (selection?.isDragging !== true) return
   if (event.type === 'move') {
     const head = clamped(shown.rows, event)
-    if (head.x !== selection.head.x || head.y !== selection.head.y) surface.setState({ ...state, selection: { ...selection, head } })
+    if (head.x === selection.head.x && head.y === selection.head.y) return
+    surface.setState({ ...state, selection: { ...selection, head, hasMoved: true } })
     return
   }
   if (event.type !== 'up') return
+  const { link: pressed } = selection
+  // A press that moved to another cell was a drag, which selects; one that did not is a click on its link.
+  if (pressed !== undefined && selection.hasMoved !== true) {
+    surface.setState({ ...state, selection: null })
+    // A click on lead-in words opens at a frame once a double-click can no longer follow.
+    const pending = pendingOpens.get(surface)
+    if (pressed.isLeadIn !== true) openOrClose(surface, pressed.action, pressed.key)
+    else if (pending !== undefined) pending.isReleased = true
+    return
+  }
   const text = textIn(shown.laid, selection)
   if (text !== '' || selection.anchor.x !== selection.head.x || selection.anchor.y !== selection.head.y) presses.delete(surface)
   // A click (a press that moved nowhere) takes a selection down, and so does a release off the
@@ -437,7 +472,7 @@ function openOrClose(surface: ClientSurface<State>, action: Action, key: string,
   if (action === 'open') {
     const next = [...open.filter(k => k !== stretch.key), stretch.key]
     surface.setState({ open: next, growth: { key: stretch.key, isOpening: true, progress: 0, duration }, asked: acted, selection: null })
-    surface.post({ open: next, opened: { short: stretch.short.trim(), key: stretch.key } } satisfies ReplyPost)
+    surface.post({ open: next, opened: { ...openedOf(stretch, namesOf(shown.segments)), key: stretch.key } } satisfies ReplyPost)
   } else {
     surface.setState({ open, growth: { key: stretch.key, isOpening: false, progress: 1, duration }, asked: acted, selection: null })
   }
@@ -446,7 +481,17 @@ function openOrClose(surface: ClientSurface<State>, action: Action, key: string,
   return true
 }
 
+/** Opens the stretch a click on lead-in words is waiting to open; false when it could not. */
+function openPending(surface: ClientSurface<State>): boolean {
+  const pending = pendingOpens.get(surface)
+  pendingOpens.delete(surface)
+  return pending !== undefined && openOrClose(surface, 'open', pending.key)
+}
+
 function tick(surface: ClientSurface<State>) {
+  const pending = pendingOpens.get(surface)
+  if (pending !== undefined) pending.framesLeft -= 1
+  if (pending !== undefined && pending.framesLeft <= 0 && pending.isReleased && openPending(surface)) return
   const state = surface.state
   const ask = asks.get(surface)
   if (state !== undefined && ask !== undefined && ask.n > state.asked) {

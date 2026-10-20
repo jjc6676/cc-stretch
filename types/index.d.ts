@@ -3,8 +3,12 @@ declare module 'claude-code' {
     'cc-stretch': {
       /** Per paragraph of a reply drawn by a Client: the keys of the stretches the reader has open. */
       open: StateFamily<string[]>
-      /** Short forms of the stretches the reader opened since their last prompt. */
-      seen: string[]
+      /**
+       * The stretches the reader opened since their last prompt: each as written and by the name the
+       * note to Claude gives it, which together tell apart two with the same short form after
+       * different words.
+       */
+      seen: Shaped<{ source: string; name: string }[]>
       /** Per group of tool calls: whether the reader opened it. */
       groups: StateFamily<boolean>
       /**

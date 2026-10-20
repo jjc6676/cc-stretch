@@ -2,7 +2,7 @@
 // runs, wrapped to the region's width, so a press can be matched to the phrase under it. Claude
 // Code draws every paragraph without a stretch with its own markdown.
 
-import { closesFence, drawnAs, isRule, openingFence } from './parse'
+import { closesFence, codeSpan, drawnAs, isLinkable, isRule, openingFence, stretches } from './parse'
 import type { Segment, Stretch } from './parse'
 
 /** What a press on a pressable phrase does to its stretch. */
@@ -17,7 +17,12 @@ export type Run = {
   dim?: true
   /** The colour of the words a stretch added. */
   tint?: string
-  link?: { action: Action; key: string }
+  /**
+   * The stretch a press acts on, and how. `isLeadIn` marks lead-in words: the words written just before
+   * a link with no words of its own, and the punctuation glued after an empty short form, which a press
+   * opens too. They stay a run apart from the link, so rows break where they would without it.
+   */
+  link?: { action: Action; key: string; isLeadIn?: true }
   /** Where a markdown link or a bare URL goes, drawn as a hyperlink. */
   href?: string
 }
@@ -41,6 +46,7 @@ export function continuationOf(row: Row): Continuation | undefined {
 const START = '\ufdd0'
 const SEP = '\ufdd1'
 const END = '\ufdd2'
+const PHRASE_MARK = /[\ufdd0-\ufdd2]/
 const TINT = '\ufdd3'
 const TINT_END = '\ufdd4'
 
@@ -79,12 +85,256 @@ export function tint(colour: string, word: string): string {
 
 /** Whether a word is markdown syntax rather than text: a bullet, a list number, a rule, a fence, a pipe, a heading mark. */
 export function isMarkup(word: string): boolean {
-  return !/[\p{L}\p{N}]/u.test(word) || /^\d+[.)]$/.test(word) || openingFence(word) !== undefined
+  return !HAS_WORDS.test(word) || /^\d+[.)]$/.test(word) || openingFence(word) !== undefined
 }
 
-/** A pressable phrase for composed text: drawn as `label`, a press does `action` to stretch `key`. */
-export function link(action: Action, key: string, label: string): string {
+/**
+ * A pressable phrase for composed text: drawn as `label`, a press does `action` to stretch `key`;
+ * `leadIn` marks lead-in words, which open it.
+ */
+export function link(action: Action | 'leadIn', key: string, label: string): string {
   return `${START}${action}${SEP}${key}${SEP}${label}${END}`
+}
+
+/** Punctuation that ends a sentence at the end of a word, before any closing quote or bracket. */
+const SENTENCE_END = /[.!?]["'”’)\]]*$/
+/** Sentence-ending punctuation of scripts that write no space after it, so it can stand inside a word. */
+const UNSPACED_SENTENCE_END = /[。！？](?=[^。！？]*$)/u
+/** Markup a pressed phrase would cut in two: emphasis, a markdown link, HTML, a URL, a table's pipe. */
+const CUT_MARKUP = /[*[\]<>|~]|:\/\/|(?:^|[^\p{L}\p{N}])_|_(?:$|[^\p{L}\p{N}])/u
+/** A bold phrase that ends a piece of a line, with any punctuation after it. */
+const BOLD_END = /(?<![*\\])\*\*(?=\S)([^*\n]*?\S)\*\*[.,;:!?"'”’]*$/
+const HAS_WORDS = /[\p{L}\p{N}]/u
+
+/**
+ * Where the lead-in words that close `text` stand, back to the start of their sentence: the line's
+ * start, a list or quote mark, or a sentence's closing punctuation, so a comma or a dash inside the
+ * sentence does not leave the reader pressing only its last clause. A code span counts as one word, and
+ * so does a bold phrase; other markup a press would cut in two ends them, and leading pieces with no
+ * letter or digit are left out. The line's own mark (an indent, a list, quote or heading mark) is never
+ * taken. Words are split at spaces only, where `wrap` breaks a row, and none is taken whose edge stands
+ * against other white space, so the words' edges add no place to break. Spaces after the words are not
+ * theirs. Undefined when no words stand there, in a table, and after an unclosed code span or `[` on
+ * the line, which a press on the words would leave half pressed.
+ */
+export function leadInOf(text: string): { from: number; to: number } | undefined {
+  const lineStart = text.lastIndexOf('\n') + 1
+  const line = text.slice(lineStart)
+  if (TABLE_ROW.test(line) || /\[[^\]]*$/.test(line)) return undefined
+  const block = HEADING.exec(line)?.[1] ?? QUOTE.exec(line)?.[1] ?? LIST_ITEM.exec(line)?.[3] ?? line.trimStart()
+  const floor = line.length - block.length
+  const pieces: { at: number; text: string; isSpace: boolean; isCode: boolean }[] = []
+  for (let i = 0; i < line.length; ) {
+    const span = line[i] === '`' ? codeSpan(line, i) : undefined
+    if (span?.open !== undefined) return undefined
+    const isCode = span !== undefined
+    const stop = span?.stop ?? i + (/^( +|[^ `]+)/.exec(line.slice(i))?.[0].length ?? 1)
+    const piece = line.slice(i, stop)
+    pieces.push({ at: i, text: piece, isSpace: /^ +$/.test(piece), isCode })
+    i = stop
+  }
+  const previous = (k: number) => {
+    let at = k - 1
+    while (at >= 0 && pieces[at]?.isSpace) at -= 1
+    return at
+  }
+  const last = previous(pieces.length)
+  const end = last < 0 ? 0 : (pieces[last]?.at ?? 0) + (pieces[last]?.text.length ?? 0)
+  let from: number | undefined
+  for (let k = last; k >= 0; k = previous(k)) {
+    const piece = pieces[k]
+    if (piece === undefined) break
+    if (!piece.isCode && CUT_MARKUP.test(piece.text)) {
+      // A bold phrase is taken whole when it starts a piece outside a code span, holds words and no
+      // other markup, and no sentence ends inside it.
+      const bold = BOLD_END.exec(line.slice(0, piece.at + piece.text.length))
+      const start = bold === null ? -1 : pieces.findIndex(p => p.at === bold.index && !p.isCode)
+      const inner = bold?.[1] ?? ''
+      const isBoldWhole =
+        start !== -1 && start <= k && HAS_WORDS.test(inner) && !CUT_MARKUP.test(inner) &&
+        pieces.slice(start, k).every(p => p.isSpace || p.isCode || !SENTENCE_END.test(p.text))
+      if (!isBoldWhole) break
+      k = start
+      from = pieces[k]?.at
+    } else {
+      // The line's own indent, list or heading mark.
+      if (piece.at < floor) break
+      const cut = piece.isCode ? null : UNSPACED_SENTENCE_END.exec(piece.text)
+      if (cut !== null) {
+        // The words start where a row may break after the full stop: a closing quote or bracket stays with it.
+        let at = 0
+        for (const unit of breakables(piece.text)) {
+          if (at >= cut.index + cut[0].length) break
+          at += unit.length
+        }
+        if (HAS_WORDS.test(piece.text.slice(at))) from = piece.at + at
+        break
+      }
+      from = piece.at
+    }
+    const before = pieces[previous(k)]
+    if (before !== undefined && !before.isCode && SENTENCE_END.test(before.text)) break
+  }
+  if (from === undefined || from < floor) return undefined
+  // A leading emoji, arrow or bullet is not a word to press.
+  for (const piece of pieces) {
+    if (piece.at < from || piece.isSpace) continue
+    if (piece.at >= end || piece.isCode || HAS_WORDS.test(piece.text)) break
+    from = piece.at + piece.text.length
+  }
+  while (from < end && line[from] === ' ') from += 1
+  const charBefore = line[from - 1] ?? ' '
+  const firstChar = line[from] ?? ''
+  const lastChar = line[end - 1] ?? ''
+  if (/\s/.test(firstChar + lastChar) || (from > floor && /[^\S ]/.test(charBefore))) return undefined
+  return HAS_WORDS.test(line.slice(from, end)) ? { from: lineStart + from, to: lineStart + end } : undefined
+}
+
+/** Roughly what `stretch` draws: its short form, closed or as text, else its long form and a «. */
+function drawnText(stretch: Stretch, isShut: (stretch: Stretch) => boolean): string {
+  const long = () => (stretch.long ?? []).map(part => (typeof part === 'string' ? part : drawnText(part, isShut))).join('')
+  switch (drawnAs(stretch)) {
+    case 'text':
+      return stretch.short
+    case 'open':
+      return long()
+    case 'link':
+      return isShut(stretch) ? stretch.short : `${long()} «`
+  }
+}
+
+/** A short form whose lead-in words open it too: none at all, or only punctuation or symbols. */
+const WORDLESS = /^[\p{P}\p{S}]*$/u
+
+/**
+ * `parts` with the lead-in words of each closed link that has no words of its own, such as a lone
+ * period, marked by `link('leadIn', …)` to open it as well; `isShut` says which links are drawn closed, and
+ * `isParagraphEnd` whether nothing is drawn after `parts`. The text stays as written. Where an empty
+ * short form joins its lead-in words to the text after it, a row cannot break between the two: that
+ * text's first piece is marked too when it is only punctuation, such as the sentence's period, so the
+ * marks add no place to break; otherwise the words are left.
+ */
+export function withLeadIns(parts: Segment[], isShut: (stretch: Stretch) => boolean, isParagraphEnd: boolean): Segment[] {
+  const { leadIns, tails } = leadInsOf(parts, isShut, isParagraphEnd)
+  return parts.map((part, i) => {
+    if (typeof part !== 'string') return part
+    let marked = ''
+    let at = 0
+    for (const span of [tails.get(i), leadIns.get(i)]) {
+      if (span === undefined) continue
+      marked += part.slice(at, span.from) + link('leadIn', span.key, part.slice(span.from, span.to))
+      at = span.to
+    }
+    return marked + part.slice(at)
+  })
+}
+
+/**
+ * What a note to Claude calls each stretch of `parts` drawn as a link, by key: its short form, and for
+ * one with no words of its own its lead-in words and the punctuation glued after it too, as drawn with
+ * every stretch closed, so lone periods after different sentences get different names. `shortsNamed`
+ * in bench/opened.ts reads these names back to short forms, so a change to how they are written
+ * changes it too.
+ */
+export function namesOf(parts: Segment[]): Map<string, string> {
+  const names = new Map<string, string>()
+  const walk = (segments: Segment[], isParagraphEnd: boolean) => {
+    const { leadIns, tails } = leadInsOf(segments, () => true, isParagraphEnd)
+    segments.forEach((part, i) => {
+      if (typeof part === 'string') return
+      if (drawnAs(part) === 'open') walk(part.long ?? [], false)
+      if (drawnAs(part) !== 'link') return
+      const before = segments[i - 1]
+      const after = segments[i + 1]
+      const leadIn = leadIns.get(i - 1)
+      const tail = tails.get(i + 1)
+      // The lead-in words and the spaces after them, as drawn up to the link.
+      const leadInText = leadIn !== undefined && typeof before === 'string' ? before.slice(leadIn.from) : ''
+      const glued = tail !== undefined && typeof after === 'string' ? after.slice(0, tail.to) : ''
+      names.set(part.key, `${leadInText}${part.short}${glued}`.trim())
+      for (const nested of stretches(part.long ?? [])) if (isLinkable(nested)) names.set(nested.key, nested.short.trim())
+    })
+  }
+  walk(parts, true)
+  return names
+}
+
+/**
+ * A stretch the reader opened, for the note to Claude: as written (`sourceOf`) and by its name
+ * (`namesOf`). Two stretches written alike after the same words are the same to the reader too.
+ */
+export type OpenedStretch = { source: string; name: string }
+
+/** `stretch` as a note to Claude names it, `names` being `namesOf` the parts it was parsed from. */
+export function openedOf(stretch: Stretch, names: ReadonlyMap<string, string>): OpenedStretch {
+  return { source: sourceOf(stretch), name: names.get(stretch.key) ?? stretch.short.trim() }
+}
+
+/**
+ * A stretch as written, braces and all, the same wherever it is parsed from, a paragraph (in the
+ * terminal) or the whole reply (in the desktop app), where its key, named among its siblings, can
+ * differ. It is here, not in parse.ts, which the bench hashes as part of the code that asks its tasks.
+ */
+function sourceOf(stretch: Stretch): string {
+  if (stretch.long === undefined) return `{{${stretch.short}}}`
+  return `{{${stretch.short}|${stretch.long.map(part => (typeof part === 'string' ? part : sourceOf(part))).join('')}}}`
+}
+
+/** Where some text in composed parts is marked: from and to, in that text, and the stretch it opens. */
+type Marked = { from: number; to: number; key: string }
+
+/**
+ * Where `withLeadIns` marks words in `parts`, by index of the text that holds them: the lead-in words
+ * before a wordless closed link, and the punctuation an empty short form is glued to (its tail), with
+ * the key each opens. Lead-in words the tail of the stretch before them overlaps are left out.
+ */
+function leadInsOf(
+  parts: Segment[],
+  isShut: (stretch: Stretch) => boolean,
+  isParagraphEnd: boolean,
+): { leadIns: Map<number, Marked>; tails: Map<number, Marked> } {
+  const leadIns = new Map<number, Marked>()
+  const tails = new Map<number, Marked>()
+  // What `parts` draw before index `i` on the same line: the words are found on the whole line, so a
+  // list mark, a code span or a `[` drawn by an earlier stretch is seen too.
+  const drawnBefore = (i: number): string => {
+    let line = ''
+    for (let j = i - 1; j >= 0; j--) {
+      const part = parts[j]
+      const drawn = part === undefined ? '' : typeof part === 'string' ? part : drawnText(part, isShut)
+      line = drawn + line
+      if (drawn.includes('\n')) break
+    }
+    return line.slice(line.lastIndexOf('\n') + 1)
+  }
+  parts.forEach((part, i) => {
+    const next = parts[i + 1]
+    if (typeof part !== 'string' || next === undefined || typeof next === 'string' || drawnAs(next) !== 'link' || !WORDLESS.test(next.short) || !isShut(next)) return
+    const before = part.includes('\n') ? '' : drawnBefore(i)
+    const found = leadInOf(before + part)
+    if (found === undefined || found.to <= before.length) return
+    const leadIn = { from: found.from - before.length, to: found.to - before.length }
+    // A sentence that starts before this text, in or before another stretch, lends only the words
+    // after that stretch, apart from it by a space, so the two links never draw as one.
+    if (leadIn.from < 0) {
+      leadIn.from = /^ */.exec(part)?.[0].length ?? 0
+      if (leadIn.from === 0 || !HAS_WORDS.test(part.slice(leadIn.from, leadIn.to))) return
+    }
+    // Words that start the text right after a stretch drawn without a run of its own (one that is only
+    // text, or an empty short form) are joined to that stretch's text: marking them would add a break.
+    const previous = parts[i - 1]
+    if (leadIn.from === 0 && previous !== undefined && (typeof previous === 'string' || drawnAs(previous) !== 'link' || previous.short === '')) return
+    const after = parts[i + 2]
+    if (leadIn.to === part.length && next.short === '' && (after !== undefined || !isParagraphEnd) && !(typeof after === 'string' && /^[ \n]/.test(after))) {
+      const glued = typeof after === 'string' ? (/^[^ \n]+/.exec(after)?.[0] ?? '') : ''
+      if (!/^[\p{P}\p{S}]+$/u.test(glued) || /[`*_~[\]<>|\\]/.test(glued)) return
+      // Punctuation that runs on into the next stretch is joined to whatever that stretch draws: marking it would add a break.
+      if (typeof after === 'string' && glued.length === after.length && (parts[i + 3] !== undefined || !isParagraphEnd)) return
+      tails.set(i + 2, { from: 0, to: glued.length, key: next.key })
+    }
+    if (leadIn.from >= (tails.get(i)?.to ?? 0)) leadIns.set(i, { ...leadIn, key: next.key })
+  })
+  return { leadIns, tails }
 }
 
 /**
@@ -281,7 +531,8 @@ function inline(text: string, tints: Line['tints'], isBold = false): Run[] {
     const first = ch === START ? text.indexOf(SEP, i + 1) : -1
     const second = first === -1 ? -1 : text.indexOf(SEP, first + 1)
     if (second !== -1) {
-      pressable = { action: text.slice(i + 1, first) === 'close' ? 'close' : 'open', key: text.slice(first + 1, second) }
+      const action = text.slice(i + 1, first)
+      pressable = { action: action === 'close' ? 'close' : 'open', key: text.slice(first + 1, second), ...(action === 'leadIn' && { isLeadIn: true }) }
       i = second + 1
       continue
     }
@@ -293,7 +544,9 @@ function inline(text: string, tints: Line['tints'], isBold = false): Run[] {
     if (ch === '`') {
       const fence = /^`+/.exec(text.slice(i))?.[0] ?? '`'
       const end = text.indexOf(fence, i + fence.length)
-      if (end !== -1) {
+      // A code span never runs over a pressable phrase's marks: half of one, as a growing long form
+      // draws it, would pair with a backtick after them and draw the marks as text.
+      if (end !== -1 && !PHRASE_MARK.test(text.slice(i, end))) {
         emit(text.slice(i + fence.length, end), i + fence.length, { code: true })
         i = end + fence.length
         continue
@@ -309,7 +562,7 @@ function inline(text: string, tints: Line['tints'], isBold = false): Run[] {
       i += 1
       continue
     }
-    const markdownLink = /^\[([^\]\n]+)\]\(([^)\s]+)\)/.exec(text.slice(i))
+    const markdownLink = /^\[([^\]\n\ufdd0-\ufdd2]+)\]\(([^)\s]+)\)/.exec(text.slice(i))
     if (markdownLink) {
       const label = markdownLink[1] ?? ''
       const href = markdownLink[2] ?? ''
@@ -461,6 +714,6 @@ function cut(text: string, room: number): [string, string] {
 function isSameStyle(a: Run, b: Run): boolean {
   return (
     a.bold === b.bold && a.italic === b.italic && a.code === b.code && a.underline === b.underline && a.dim === b.dim && a.tint === b.tint &&
-    a.link?.action === b.link?.action && a.link?.key === b.link?.key && a.href === b.href
+    a.link?.action === b.link?.action && a.link?.key === b.link?.key && a.link?.isLeadIn === b.link?.isLeadIn && a.href === b.href
   )
 }

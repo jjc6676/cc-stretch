@@ -3,6 +3,7 @@
 // cc-stretch attached to their next prompt, if any.
 import { readFileSync } from 'node:fs'
 import { openedFrom } from './measure.ts'
+import { shortsNamed } from './opened.ts'
 
 export type Turn = {
   session: string
@@ -10,7 +11,10 @@ export type Turn = {
   prompt: string
   /** The text after the turn's last tool call: what the person reads as the answer. */
   reply: string
-  /** Short forms the reader opened, from the note on the next prompt; undefined when there was none. */
+  /**
+   * Short forms the reader opened, from the note on the next prompt, beside the names it gives stretches
+   * with no words of their own (bench/opened.ts); undefined when there was none.
+   */
   opened?: Set<string>
 }
 
@@ -60,7 +64,7 @@ export function turnsOf(path: string): Turn[] {
     const last = turns.at(-1)
     if (note.includes('Stretchtext:') && last !== undefined) {
       const text = JSON.parse(`"${/Stretchtext:[^"\\]*(?:\\.[^"\\]*)*/.exec(note)?.[0] ?? ''}"`) as string
-      last.opened = openedFrom(text)
+      last.opened = shortsNamed(last.reply, openedFrom(text))
       continue
     }
     if (!current || row.type !== 'assistant') continue
