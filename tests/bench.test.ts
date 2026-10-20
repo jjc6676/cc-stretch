@@ -48,6 +48,9 @@ describe('benchmark measures', () => {
   test('tells a long form that holds sections or the status block from one that holds neither', async () => {
     const status = 'Status: built, not pushed.\n\n---\n\n**MISSION** · x — y\n\n- [x] Built the thing\n- [ ] Push it\n- [ ] Tag it'
     expect(hiddenIn(status)).toBe('status block')
+    expect(hiddenIn('---\n\n- [x] Fixed it\n- [x] Pushed it\n\n**Later** · Rebuild\n\n---')).toBe('status block')
+    expect(hiddenIn('Two parts:\n\n**One.** A.\n\n---\n\n**Two.** B.')).toBe('sections')
+    expect(hiddenIn('---\n\n**One.** A.\n\n**Two.** B.\n\n---')).toBe('status block')
     expect(hiddenIn('Why it turned it down:\n\n- **One.** A.\n- **Two.** B.')).toBe('sections')
     expect(hiddenIn('\n\n**What the lens found.** A gap.\n\n**What I did.** Closed it.')).toBe('sections')
     expect(hiddenIn('Three steps:\n1. a\n2. b\n3. c')).toBe('sections')

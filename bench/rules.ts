@@ -42,6 +42,9 @@ const added = (stretch: Stretch) => {
   return g.before + g.between + g.after
 }
 
+/** Whether drawn text holds a block between two rules, the shape a closing block takes. */
+const holdsRuledBlock = (drawn: string) => drawn.split('\n').filter(isRule).length >= 2
+
 export const RULES: readonly Rule[] = [
   {
     id: 'keeps-short-words',
@@ -117,8 +120,7 @@ export const RULES: readonly Rule[] = [
       const tail = parts.slice(at + 1).flatMap(part => (typeof part === 'string' ? part.split('\n') : []))
       if (!tail.every(line => line.trim() === '' || isRule(line))) return 'text follows the closing stretch'
       if (drawnAs(last) !== 'link') return `the reply ends in ${quoted(last.short)}, which is not a link`
-      const dividers = draw(last.long ?? [], 'all').split('\n').filter(isRule).length
-      if (dividers >= 2) return undefined
+      if (holdsRuledBlock(draw(last.long ?? [], 'all'))) return undefined
       // The block's separators can frame the final stretch without becoming part of its content.
       const before = parts[at - 1]
       const framed = typeof before === 'string' && isRule(before.trimEnd().split('\n').at(-1) ?? '') && tail.some(isRule)
@@ -212,18 +214,20 @@ export function adjudicate(verdict: RuleVerdict, overrides: readonly Override[],
 /** Whether `id` names a rule. */
 export const isRuleId = (id: string): id is RuleId => RULES.some(rule => rule.id === id)
 
-/** What a link can hide besides plain text: the reply's closing status block, or several sections or a list. */
+/** What a link can hide besides plain text: a status block, or several sections or a list. */
 export type Hidden = 'status block' | 'sections'
 
 /**
- * What a link hides, read from its opened long form: the closing status block (a line that starts
- * `**MISSION**`), sections or a list (two or more lines led by bold text, or three or more list
- * items), or neither. In live replies Opus 5.5 wrote under Claude Code 2.1.302, most links that
- * hid sections had a label for a short form, and links that hid the status block, whose short form
- * the guide asks to be a one-line gist, did not.
+ * What a link hides, read from its opened long form: a status block (a line that starts
+ * `**MISSION**`, or a block between two rules, which wins over sections; unlike
+ * `closing-block-last`, it cannot see rules that frame the link from outside), sections or a list
+ * (two or more lines led by bold text, or three or more list items), or neither. In live
+ * replies Opus 5.5 wrote under Claude Code 2.1.302, most links that hid sections had a label for a
+ * short form, and links that hid the status block, whose short form the guide asks to be a one-line
+ * gist, did not.
  */
 export function hiddenIn(long: string): Hidden | undefined {
-  if (/^[ \t]*\*\*MISSION\*\*/m.test(long)) return 'status block'
+  if (/^[ \t]*\*\*MISSION\*\*/m.test(long) || holdsRuledBlock(long)) return 'status block'
   const lines = long.split('\n')
   const led = lines.filter(line => /^\*\*[^*]+\*\*/.test(LIST_ITEM.exec(line)?.[3] ?? line.trimStart())).length
   const items = lines.filter(line => LIST_ITEM.test(line)).length

@@ -805,7 +805,6 @@ function report() {
   console.log(`${rewriteRows.length} rewrite attempts: ${failedCalls} failed calls, ${broken} broken rewrites (kept under ${VALID_RECALL * 100}% of the content words)\n`)
 
   const metrics = ['skim share', 'right-only stretches', 'words added left', 'words added middle', 'colon titles', 'labels', 'labels on sections or lists', 'labels on the status block', 'top-3 points carried', 'all points carried'] as const
-  /** The judge's verdicts on the links in view that hide `body`, in `found`'s rewrites. */
   /** The counted replies' measures for one arm and repeat. */
   const foundIn = (arm: string, repeat: number) => counted.flatMap(id => lookup(arm, repeat, id) ?? [])
   /** The judge's verdicts on the links in view that hide `what`. */
